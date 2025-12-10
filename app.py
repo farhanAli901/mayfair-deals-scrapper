@@ -33,15 +33,21 @@ class ProductDealAgent:
     def setup_browser(self):
         """Initialize Chrome browser with Selenium"""
         chrome_options = Options()
-        chrome_options.add_argument('--headless')  # Run in background
+        chrome_options.add_argument('--headless')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument('--disable-setuid-sandbox')
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        # Remove this line - let Chrome auto-detect
+        # chrome_options.binary_location = "/usr/bin/chromium-browser"
         
         service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
-    
+        
     def close_browser(self):
         """Close the browser"""
         if self.driver:
