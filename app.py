@@ -16,8 +16,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
 import re
 from dotenv import load_dotenv
 
@@ -110,230 +108,7 @@ class ProductDealAgent:
             print(f"Error capturing screenshots: {str(e)}")
             return None
     
-    def find_gallery_containers(self):
-        """Identify product gallery containers from the page"""
-        gallery_selectors = [
-            "[data-gallery]",
-            ".product-gallery",
-            ".product__media",
-            ".woocommerce-product-gallery",
-            ".product-images",
-            ".product-image-gallery",
-            ".gallery",
-            ".swiper-slide",
-            ".slick-slide",
-            "[data-carousel]",
-            ".carousel-item",
-            ".image-gallery",
-            ".photo-gallery",
-            "[class*='gallery']",
-            "[class*='product-image']",
-            "[class*='media']",
-        ]
-        
-        gallery_containers = []
-        
-        for selector in gallery_selectors:
-            try:
-                containers = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for container in containers:
-                    if container not in gallery_containers:
-                        gallery_containers.append(container)
-            except:
-                continue
-        
-        return gallery_containers
-    
-    def extract_image_urls_from_gallery(self, gallery_containers):
-        """Extract image URLs from identified gallery containers"""
-        image_urls = []
-        seen_filenames = set()  # Track duplicates
-        
-        for container in gallery_containers:
-            try:
-                # Find all images within this container
-                images = container.find_elements(By.TAG_NAME, "img")
-                
-                for img_element in images:
-                    # Check if image dimensions are adequate (width >= 300px)
-                    try:
-                        width = img_element.size.get('width', 0)
-                        if width < 300:
-                            continue
-                    except:
-                        pass
-                    
-                    # Extract URLs from multiple attributes
-                    image_url = None
-                    
-                    # Priority 1: data-large_image
-                    image_url = img_element.get_attribute("data-large_image")
-                    
-                    # Priority 2: src
-                    if not image_url:
-                        image_url = img_element.get_attribute("src")
-                    
-                    # Priority 3: data-src (lazy loading)
-                    if not image_url:
-                        image_url = img_element.get_attribute("data-src")
-                    
-                    # Priority 4: srcset (pick the largest)
-                    if not image_url:
-                        srcset = img_element.get_attribute("srcset")
-                        if srcset:
-                            # Extract the last (largest) URL from srcset
-                            srcset_urls = [url.split()[0] for url in srcset.split(",")]
-                            image_url = srcset_urls[-1] if srcset_urls else None
-                    
-                    # Check if parent is a zoom link
-                    if not image_url:
-                        parent_link = img_element.find_element(By.XPATH, "parent::a")
-                        try:
-                            image_url = parent_link.get_attribute("href")
-                        except:
-                            pass
-                    
-                    if image_url:
-                        # Normalize URL
-                        image_url = image_url.strip()
-                        
-                        # Handle relative URLs
-                        if image_url.startswith('/'):
-                            base_url = self.driver.execute_script("return window.location.origin")
-                            image_url = base_url + image_url
-                        elif not image_url.startswith(('http://', 'https://')):
-                            # Might be a protocol-relative URL
-                            if image_url.startswith('//'):
-                                image_url = 'https:' + image_url
-                            else:
-                                base_url = self.driver.execute_script("return window.location.origin")
-                                if not image_url.startswith('/'):
-                                    image_url = '/' + image_url
-                                image_url = base_url + image_url
-                        
-                        # Avoid duplicates
-                        filename = urlparse(image_url).path.split('/')[-1]
-                        if filename not in seen_filenames:
-                            image_urls.append(image_url)
-                            seen_filenames.add(filename)
-            
-            except Exception as e:
-                print(f"⚠ Error extracting images from container: {str(e)}")
-                continue
-        
-        return image_urls
-    
-    def optimize_image_url(self, image_url):
-        """Optimize image URL for highest quality"""
-        # Shopify optimization: convert to highest resolution
-        if 'cdn.shopify.com' in image_url or 'shopifycdn' in image_url:
-            image_url = re.sub(r'_\d+x\d+\.', '_2048x2048.', image_url)
-        
-        return image_url
-    
-    def download_image_with_retry(self, image_url, save_path, max_retries=3):
-        """Download a single image with retry logic"""
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(image_url, timeout=10, allow_redirects=True)
-                if response.status_code == 200:
-                    with open(save_path, 'wb') as f:
-                        f.write(response.content)
-                    return True
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    print(f"⚠ Failed to download after {max_retries} retries: {image_url[:50]}... - {str(e)}")
-                    return False
-                time.sleep(1)  # Wait before retry
-        
-        return False
-    
-    def extract_product_gallery_images(self, product_name, max_images=5):
-        """
-        Extract product gallery images with quality filtering and deduplication.
-        
-        Args:
-            product_name: Name of the product (used for folder naming)
-            max_images: Maximum number of images to keep (3-5, default: 5)
-        
-        Returns:
-            List of saved image paths (deduplicated, max 5), or empty list if no images found
-        """
-        saved_images = []
-        
-        try:
-            print("🔍 Identifying product gallery containers...")
-            gallery_containers = self.find_gallery_containers()
-            
-            if not gallery_containers:
-                print("⚠ No gallery containers found, searching all images...")
-                # Fallback: find all images on the page
-                all_images = self.driver.find_elements(By.TAG_NAME, "img")
-                gallery_containers = all_images
-            
-            print(f"✓ Found {len(gallery_containers)} potential gallery containers")
-            
-            # Extract image URLs
-            image_urls = self.extract_image_urls_from_gallery(gallery_containers)
-            print(f"✓ Extracted {len(image_urls)} unique image URLs")
-            
-            if not image_urls:
-                print("⚠ No product images found")
-                return saved_images
-            
-            # Limit to max_images (3-5 range)
-            image_urls = image_urls[:max_images]
-            print(f"✓ Limited to {len(image_urls)} images for download")
-            
-            # Create folder for product images
-            # Sanitize product name for folder creation
-            safe_product_name = "".join(c for c in product_name if c.isalnum() or c in (' ', '-', '_'))[:50]
-            safe_product_name = safe_product_name.replace(' ', '_').strip('_')
-            
-            if not safe_product_name:
-                safe_product_name = "product_images"
-            
-            product_folder = Path(safe_product_name)
-            product_folder.mkdir(exist_ok=True)
-            
-            print(f"📁 Saving images to folder: {product_folder}")
-            
-            # Track downloaded images to avoid duplicates
-            downloaded_files = set()
-            
-            # Download images in parallel
-            download_tasks = []
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                for idx, image_url in enumerate(image_urls, 1):
-                    # Optimize URL
-                    image_url = self.optimize_image_url(image_url)
-                    
-                    # Use simple numbered naming
-                    save_path = product_folder / f"{idx}.jpg"
-                    task = executor.submit(self.download_image_with_retry, image_url, str(save_path))
-                    download_tasks.append((idx, image_url, save_path, task))
-            
-            # Collect results (maintain order, skip failed downloads)
-            for idx, image_url, save_path, task in download_tasks:
-                if task.result():
-                    image_path_str = str(save_path).replace('\\', '/')
-                    # Only add if successfully downloaded and not already added
-                    if image_path_str not in downloaded_files:
-                        saved_images.append(image_path_str)
-                        downloaded_files.add(image_path_str)
-                        print(f"✓ Downloaded image {idx}: {image_path_str}")
-                else:
-                    print(f"✗ Failed to download image {idx}: {image_url[:50]}...")
-            
-            # Final limit: ensure we never return more than 5 images
-            saved_images = saved_images[:5]
-            
-            print(f"✓ Successfully saved {len(saved_images)} images")
-            return saved_images
-        
-        except Exception as e:
-            print(f"❌ Error in extract_product_gallery_images: {str(e)}")
-            return saved_images
+
     
     def encode_image_from_bytes(self, image_bytes):
         """Encode image bytes to base64"""
@@ -436,7 +211,7 @@ ANALYZE ALL 3 SCREENSHOTS CAREFULLY before responding. Be thorough and accurate.
         except Exception as e:
             return {"error": f"Error extracting info from screenshots: {str(e)}"}
     
-    def get_product_deal(self, url, save_image=True):
+    def get_product_deal(self, url):
         """Main method to get product deal information"""
         try:
             # Setup browser
@@ -451,32 +226,7 @@ ANALYZE ALL 3 SCREENSHOTS CAREFULLY before responding. Be thorough and accurate.
             # Extract product information from all screenshots
             product_info = self.extract_product_info_from_screenshots(screenshots, url)
             
-            # Download product gallery images (3-5 images max)
-            if save_image and "error" not in product_info:
-                product_name = product_info.get("title", "Product")
-                image_paths = self.extract_product_gallery_images(product_name, max_images=5)
-                
-                # Clean and deduplicate image paths
-                unique_images = []
-                seen_paths = set()
-                for img_path in image_paths:
-                    normalized_path = str(img_path).replace('\\', '/').strip()
-                    if normalized_path and normalized_path not in seen_paths:
-                        unique_images.append(normalized_path)
-                        seen_paths.add(normalized_path)
-                
-                # Limit to 5 images max
-                unique_images = unique_images[:5]
-                
-                # Add to product info
-                product_info["images"] = unique_images
-                product_info["image_count"] = len(unique_images)
-            else:
-                # No images if error or save_image is False
-                product_info["images"] = []
-                product_info["image_count"] = 0
-            
-            # Ensure clean JSON structure (no duplicate fields)
+            # Return only product information without images
             clean_result = {
                 "title": product_info.get("title", "Not found"),
                 "brand": product_info.get("brand", "Not found"),
@@ -485,9 +235,7 @@ ANALYZE ALL 3 SCREENSHOTS CAREFULLY before responding. Be thorough and accurate.
                 "discounted_price": product_info.get("discounted_price", "Not found"),
                 "discount_percentage": product_info.get("discount_percentage", "Not found"),
                 "expiry_date": product_info.get("expiry_date", "Not found"),
-                "description": product_info.get("description", "Not found"),
-                "images": product_info.get("images", []),
-                "image_count": product_info.get("image_count", 0)
+                "description": product_info.get("description", "Not found")
             }
             
             return clean_result
@@ -502,7 +250,6 @@ ANALYZE ALL 3 SCREENSHOTS CAREFULLY before responding. Be thorough and accurate.
 
 class URLRequest(BaseModel):
     url: str
-    save_image: bool = True
 
 
 @app.post("/extract-product")
@@ -525,7 +272,7 @@ async def extract_product(request: URLRequest):
             raise HTTPException(status_code=500, detail="OpenAI API key not configured")
         agent = ProductDealAgent(api_key)
         
-        result = agent.get_product_deal(url, save_image=request.save_image)
+        result = agent.get_product_deal(url)
         
         if "error" in result:
             raise HTTPException(status_code=500, detail=result["error"])
@@ -553,8 +300,7 @@ async def root():
             "method": "POST",
             "endpoint": "/extract-product",
             "body": {
-                "url": "https://example.com/product",
-                "save_image": True
+                "url": "https://example.com/product"
             }
         }
     }
